@@ -1,0 +1,6 @@
+{
+  "name": "Neev Web Bff",
+  "description": "A production-ready, highly secure, full-stack Backend-for-Frontend (BFF) microservice built on Node.js, Fastify, and TypeScript",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
