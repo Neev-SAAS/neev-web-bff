@@ -1,7 +1,7 @@
 import { FastifyInstance } from 'fastify';
 import { getKcAdminClient, oidcClient } from '../config/keycloak.js';
 import { requireAuth } from '../middleware/auth.middleware.js';
-import { TokenSet } from 'openid-client';
+import { TokenSet, generators } from 'openid-client';
 
 function isEmailVerified(tokenSet: TokenSet): boolean {
   try {
@@ -41,6 +41,34 @@ function isEmailVerified(tokenSet: TokenSet): boolean {
   }
 
   return false;
+}
+
+function getAppUrl(req: any): string {
+  const host = req.headers['x-forwarded-host'] || req.headers.host || '';
+  const isCloudEnv = host.includes('run.app') || host.includes('google') || host.includes('aistudio');
+
+  if (process.env.APP_URL && !process.env.APP_URL.includes('your-app-url')) {
+    if (!isCloudEnv || !process.env.APP_URL.includes('localhost')) {
+      return process.env.APP_URL.replace(/\/+$/, '');
+    }
+  }
+  const proto = req.headers['x-forwarded-proto'] || 'http';
+  const finalHost = host || 'localhost:3000';
+  return `${proto}://${finalHost}`;
+}
+
+function getFrontendUrl(req: any): string {
+  const host = req.headers['x-forwarded-host'] || req.headers.host || '';
+  const isCloudEnv = host.includes('run.app') || host.includes('google') || host.includes('aistudio');
+
+  if (process.env.FRONTEND_URL && !process.env.FRONTEND_URL.includes('your-frontend-url')) {
+    if (!isCloudEnv || !process.env.FRONTEND_URL.includes('localhost')) {
+      return process.env.FRONTEND_URL.replace(/\/+$/, '');
+    }
+  }
+  const proto = req.headers['x-forwarded-proto'] || 'http';
+  const finalHost = host || 'localhost:3000';
+  return `${proto}://${finalHost}`;
 }
 
 export async function setupAuthRoutes(app: FastifyInstance) {
@@ -249,7 +277,7 @@ export async function setupAuthRoutes(app: FastifyInstance) {
         path: '/',
         httpOnly: true,
         secure: process.env.NODE_ENV === 'production',
-        sameSite: 'strict' as const,
+        sameSite: 'lax' as const,
       };
 
       reply.setCookie('access_token', tokenSet.access_token!, cookieOptions);
@@ -324,10 +352,35 @@ export async function setupAuthRoutes(app: FastifyInstance) {
     if (!oidcClient) {
       return reply.code(503).send({ error: 'Keycloak OIDC Client is not initialized.' });
     }
+    const redirectUri = `${getAppUrl(req)}/api/auth/callback/google`;
+    
+    // Ensure this dynamic redirect URI is registered in openid-client allowed redirect URIs
+    if (oidcClient.metadata) {
+      if (!oidcClient.metadata.redirect_uris) {
+        oidcClient.metadata.redirect_uris = [];
+      }
+      if (!oidcClient.metadata.redirect_uris.includes(redirectUri)) {
+        oidcClient.metadata.redirect_uris.push(redirectUri);
+      }
+    }
+
+    const code_verifier = generators.codeVerifier();
+    const code_challenge = generators.codeChallenge(code_verifier);
+
+    reply.setCookie('pkce_code_verifier', code_verifier, {
+      path: '/',
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'lax' as const,
+      maxAge: 900 // 15 minutes
+    });
+
     const authUrl = oidcClient.authorizationUrl({
       scope: 'openid email profile',
       kc_idp_hint: 'google',
-      redirect_uri: `${process.env.APP_URL}/api/auth/callback/google`
+      redirect_uri: redirectUri,
+      code_challenge,
+      code_challenge_method: 'S256'
     });
     return reply.redirect(authUrl);
   });
@@ -355,10 +408,35 @@ export async function setupAuthRoutes(app: FastifyInstance) {
     if (!oidcClient) {
       return reply.code(503).send({ error: 'Keycloak OIDC Client is not initialized.' });
     }
+    const redirectUri = `${getAppUrl(req)}/api/auth/callback/linkedin`;
+
+    // Ensure this dynamic redirect URI is registered in openid-client allowed redirect URIs
+    if (oidcClient.metadata) {
+      if (!oidcClient.metadata.redirect_uris) {
+        oidcClient.metadata.redirect_uris = [];
+      }
+      if (!oidcClient.metadata.redirect_uris.includes(redirectUri)) {
+        oidcClient.metadata.redirect_uris.push(redirectUri);
+      }
+    }
+
+    const code_verifier = generators.codeVerifier();
+    const code_challenge = generators.codeChallenge(code_verifier);
+
+    reply.setCookie('pkce_code_verifier', code_verifier, {
+      path: '/',
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'lax' as const,
+      maxAge: 900 // 15 minutes
+    });
+
     const authUrl = oidcClient.authorizationUrl({
       scope: 'openid email profile',
       kc_idp_hint: 'linkedin',
-      redirect_uri: `${process.env.APP_URL}/api/auth/callback/linkedin`
+      redirect_uri: redirectUri,
+      code_challenge,
+      code_challenge_method: 'S256'
     });
     return reply.redirect(authUrl);
   });
@@ -366,18 +444,23 @@ export async function setupAuthRoutes(app: FastifyInstance) {
   // 6. SOCIAL CALLBACKS
   const handleCallback = async (req: any, reply: any, redirectUri: string) => {
     if (!oidcClient) {
-      return reply.redirect(`${process.env.FRONTEND_URL}/login?error=keycloak_not_initialized`);
+      return reply.redirect(`${getFrontendUrl(req)}/login?error=keycloak_not_initialized`);
     }
     try {
       const params = oidcClient.callbackParams(req);
-      const tokenSet = await oidcClient.callback(redirectUri, params);
+      const code_verifier = req.cookies.pkce_code_verifier;
+
+      const tokenSet = await oidcClient.callback(redirectUri, params, { code_verifier });
+
+      // Clean up PKCE cookie
+      reply.clearCookie('pkce_code_verifier', { path: '/' });
 
       // Social login providers (Google, LinkedIn, etc.) pre-verify emails, so we bypass manual verification.
       const cookieOptions = {
         path: '/',
         httpOnly: true,
         secure: process.env.NODE_ENV === 'production',
-        sameSite: 'strict' as const,
+        sameSite: 'lax' as const,
       };
 
       reply.setCookie('access_token', tokenSet.access_token!, cookieOptions);
@@ -386,19 +469,45 @@ export async function setupAuthRoutes(app: FastifyInstance) {
       }
 
       // Redirect back to Vue.js frontend
-      return reply.redirect(`${process.env.FRONTEND_URL}/dashboard`);
+      return reply.redirect(`${getFrontendUrl(req)}/dashboard`);
     } catch (error) {
       app.log.error(error as Error, 'Callback error:');
-      return reply.redirect(`${process.env.FRONTEND_URL}/login?error=auth_failed`);
+      // Clean up PKCE cookie in case of error too
+      reply.clearCookie('pkce_code_verifier', { path: '/' });
+      return reply.redirect(`${getFrontendUrl(req)}/login?error=auth_failed`);
     }
   };
 
   app.get('/callback/google', async (req, reply) => {
-    return handleCallback(req, reply, `${process.env.APP_URL}/api/auth/callback/google`);
+    const redirectUri = `${getAppUrl(req)}/api/auth/callback/google`;
+
+    // Ensure this dynamic redirect URI is registered in openid-client allowed redirect URIs
+    if (oidcClient && oidcClient.metadata) {
+      if (!oidcClient.metadata.redirect_uris) {
+        oidcClient.metadata.redirect_uris = [];
+      }
+      if (!oidcClient.metadata.redirect_uris.includes(redirectUri)) {
+        oidcClient.metadata.redirect_uris.push(redirectUri);
+      }
+    }
+
+    return handleCallback(req, reply, redirectUri);
   });
 
   app.get('/callback/linkedin', async (req, reply) => {
-    return handleCallback(req, reply, `${process.env.APP_URL}/api/auth/callback/linkedin`);
+    const redirectUri = `${getAppUrl(req)}/api/auth/callback/linkedin`;
+
+    // Ensure this dynamic redirect URI is registered in openid-client allowed redirect URIs
+    if (oidcClient && oidcClient.metadata) {
+      if (!oidcClient.metadata.redirect_uris) {
+        oidcClient.metadata.redirect_uris = [];
+      }
+      if (!oidcClient.metadata.redirect_uris.includes(redirectUri)) {
+        oidcClient.metadata.redirect_uris.push(redirectUri);
+      }
+    }
+
+    return handleCallback(req, reply, redirectUri);
   });
 
   // 7. RESET PASSWORD

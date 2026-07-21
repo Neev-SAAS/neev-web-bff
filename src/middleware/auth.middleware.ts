@@ -35,7 +35,7 @@ export async function requireAuth(req: FastifyRequest, reply: FastifyReply) {
         path: '/',
         httpOnly: true,
         secure: process.env.NODE_ENV === 'production',
-        sameSite: 'strict',
+        sameSite: 'lax',
       });
 
       if (tokenSet.refresh_token) {
@@ -43,7 +43,7 @@ export async function requireAuth(req: FastifyRequest, reply: FastifyReply) {
           path: '/',
           httpOnly: true,
           secure: process.env.NODE_ENV === 'production',
-          sameSite: 'strict',
+          sameSite: 'lax',
         });
       }
     }
